@@ -7,7 +7,7 @@ package main
 //
 
 import "fmt"
-import "../mr"
+import "awesomeProject/MIT-6.824/src/mr"
 import "plugin"
 import "os"
 import "log"
