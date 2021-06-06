@@ -18,14 +18,14 @@ package raft
 //
 
 import "sync"
-import "labrpc"
+import "../labrpc"
 import "time"
 import "math/rand"
 import "sync/atomic"
 import "fmt"
 
 import "bytes"
-import "labgob"
+import "../labgob"
 
 const (
 	HeartbeatInterval    = time.Duration(120) * time.Millisecond
@@ -72,11 +72,11 @@ func (rf *Raft) convertTo(s NodeState) {
 		rf.startElection()
 
 	case Leader:
-		for i := range rf.nextIndex {
+		for i := range rf.nextIndex { //对于每一台服务器，发送到该服务器的下一个日志条目的索引（初始值为领导者最后的日志条目的索引+1）
 			// initialized to leader last log index + 1
 			rf.nextIndex[i] = rf.getAbsoluteLogIndex(len(rf.logs))
 		}
-		for i := range rf.matchIndex {
+		for i := range rf.matchIndex { //对于每一台服务器，已知的已经复制到该服务器的最高日志条目的索引（初始值为0，单调递增）
 			rf.matchIndex[i] = rf.snapshottedIndex
 		}
 
@@ -130,8 +130,8 @@ type Raft struct {
 	state          NodeState   // 2A
 
 	logs        []LogEntry    // 2B
-	commitIndex int           // 2B
-	lastApplied int           // 2B
+	commitIndex int           // 2B已知已提交的最高的日志条目的索引
+	lastApplied int           // 2B已经被应用到状态机的最高的日志条目的索引 （持久化）
 	nextIndex   []int         // 2B
 	matchIndex  []int         // 2B
 	applyCh     chan ApplyMsg // 2B
@@ -364,10 +364,10 @@ type AppendEntriesArgs struct {
 	Term     int // 2A
 	LeaderId int // 2A
 
-	PrevLogIndex int        // 2B
-	PrevLogTerm  int        // 2B
-	LogEntries   []LogEntry // 2B
-	LeaderCommit int        // 2B
+	PrevLogIndex int        // 2B紧邻新日志条目之前的那个日志条目的索引，目前 Leader 认为该 Follower 已经同步的位置。因此设置为 nextIndex[Follower] 的前一位即可
+	PrevLogTerm  int        // 2B紧邻新日志条目之前的那个日志条目的任期
+	LogEntries   []LogEntry // 2B需要被保存的日志条目（被当做心跳使用是 则日志条目内容为空；为了提高效率可能一次性发送多个）
+	LeaderCommit int        // 2B领导者的已知已提交的最高的日志条目的索引
 }
 
 type AppendEntriesReply struct {
@@ -408,13 +408,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// if snapshottedIndex == prevLogIndex, all log entries should be added.
 			startIdx := rf.snapshottedIndex - args.PrevLogIndex
 			// only keep the last snapshotted one
-			rf.logs = rf.logs[:1]
-			rf.logs = append(rf.logs, args.LogEntries[startIdx:]...)
+			rf.logs = rf.logs[:1]                                    //log 0处不存东西
+			rf.logs = append(rf.logs, args.LogEntries[startIdx:]...) //直接全部覆盖
 		}
 
 		return
 	}
-
+	//这里是else的情况
 	// entries before args.PrevLogIndex might be unmatch
 	// return false and ask Leader to decrement PrevLogIndex
 	absoluteLastLogIndex := rf.getAbsoluteLogIndex(len(rf.logs) - 1)
@@ -853,7 +853,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = time.NewTimer(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
 	rf.state = Follower
 
-	rf.applyCh = applyCh
+	rf.applyCh = applyCh          //is null when make
 	rf.logs = make([]LogEntry, 1) // start from index 1
 
 	// initialize from state persisted before a crash
