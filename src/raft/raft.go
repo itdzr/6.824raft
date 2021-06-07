@@ -17,14 +17,78 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"time"
+)
 import "sync/atomic"
-import "../labrpc"
+import "labrpc"
 
 // import "bytes"
 // import "../labgob"
 
+const (
+	HeartbeatInterval    = time.Duration(120) * time.Millisecond
+	ElectionTimeoutLower = time.Duration(300) * time.Millisecond
+	ElectionTimeoutUpper = time.Duration(400) * time.Millisecond
+)
 
+type NodeState uint8
+
+const (
+	Follower  = NodeState(1)
+	Candidate = NodeState(2)
+	Leader    = NodeState(3)
+)
+
+func (s NodeState) String() string {
+	switch {
+	case s == Follower:
+		return "Follower"
+	case s == Candidate:
+		return "Candidate"
+	case s == Leader:
+		return "Leader"
+	}
+	return "Unknown"
+}
+func (rf *Raft) convertTo(s NodeState) {
+	if s == rf.state {
+		return
+	}
+	fmt.Printf("Term %d: server %d convert from %v to %v\n",
+		rf.currentTerm, rf.me, rf.state, s)
+	rf.state = s
+	switch s {
+	case Follower:
+		rf.heartbeatTimer.Stop()                                                                   //stop Timing to send heartbeat (if leader)
+		resetTimer(rf.electionTimer, randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper)) //elect leader timer
+		rf.votedFor = -1
+	case Candidate:
+		rf.startElection()
+	case Leader:
+		rf.electionTimer.Stop()
+		rf.broadcastHeartbeat()
+		resetTimer(rf.heartbeatTimer, HeartbeatInterval) //Timing to send heartbeat
+
+	}
+}
+
+func randTimeDuration(lower, upper time.Duration) time.Duration {
+	num := rand.Int63n(upper.Milliseconds()-lower.Milliseconds()) + lower.Milliseconds()
+	return time.Duration(num) * time.Millisecond
+}
+func resetTimer(timer *time.Timer, d time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
+}
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -56,16 +120,160 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm    int
+	votedFor       int
+	electionTimer  *time.Timer
+	heartbeatTimer *time.Timer
+	state          NodeState
+}
+type AppendEntriesArgs struct {
+	Term     int // 2A
+	LeaderId int // 2A
 
+}
+type AppendEntriesReply struct {
+	Term    int  // 2A
+	Success bool // 2A
+
+}
+
+func (rf *Raft) startElection() {
+	rf.currentTerm += 1
+	rf.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+
+	args := RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+	}
+	var voteCount int32
+	for i := range rf.peers {
+		if i == rf.me {
+			rf.votedFor = rf.me
+			atomic.AddInt32(&voteCount, 1)
+			continue
+		}
+		go func(server int) {
+			var reply RequestVoteReply
+			if rf.sendRequestVote(server, &args, &reply) { //rpc parallel
+				rf.mu.Lock()
+				if reply.VoteGranted && rf.state == Candidate { //must be because maybe changed to follower
+					atomic.AddInt32(&voteCount, 1)
+					if atomic.LoadInt32(&voteCount) > int32(len(rf.peers)/2) {
+						rf.convertTo(Leader)
+					}
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.convertTo(Follower)
+					}
+				}
+				rf.mu.Unlock()
+
+			} else {
+				fmt.Printf("%+v send request vote to %d failed", rf, server)
+			}
+		}(i)
+	}
+}
+
+func (rf *Raft) broadcastHeartbeat() {
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(server int) {
+			rf.mu.Lock()
+
+			if rf.state != Leader {
+				rf.mu.Unlock()
+				return
+			}
+
+			args := AppendEntriesArgs{
+				Term:     rf.currentTerm,
+				LeaderId: rf.me,
+			}
+			rf.mu.Unlock()
+			var reply AppendEntriesReply
+			if rf.sendAppendEntries(server, &args, &reply) {
+				rf.mu.Lock()
+				if rf.state != Leader {
+					rf.mu.Unlock()
+					return
+				}
+				if reply.Success {
+
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.convertTo(Follower)
+						rf.persist()
+					} else {
+
+					}
+				}
+				rf.mu.Unlock()
+			}
+		}(i)
+
+	}
+}
+
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist() // execute before rf.mu.Unlock()
+	if args.Term < rf.currentTerm ||
+		(args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId) {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.convertTo(Follower)
+		// do not return here.
+	}
+	rf.votedFor = args.CandidateId
+	reply.Term = rf.currentTerm // not used, for better logging
+	reply.VoteGranted = true
+
+	resetTimer(rf.electionTimer,
+		randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist() // execute before rf.mu.Unlock()
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.convertTo(Follower)
+		// do not return here.
+	}
+	resetTimer(rf.electionTimer,
+		randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+
+	reply.Success = true
+	return
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = rf.currentTerm
+	isleader = rf.state == Leader
+	return term, isleader
 	return term, isleader
 }
 
@@ -84,7 +292,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -108,15 +315,14 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term        int
+	CandidateId int
 }
 
 //
@@ -125,14 +331,13 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-}
 
 //
 // example code to send a RequestVote RPC to a server.
@@ -167,7 +372,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
-
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -189,7 +397,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -235,9 +442,39 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 
+	rf.currentTerm = 0
+	rf.votedFor = -1 // voted for no one
+	rf.heartbeatTimer = time.NewTimer(HeartbeatInterval)
+	rf.electionTimer = time.NewTimer(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+	rf.state = Follower
 	// initialize from state persisted before a crash
+	rf.mu.Lock()
 	rf.readPersist(persister.ReadRaftState())
+	rf.mu.Unlock()
 
-
+	go func(node *Raft) {
+		for {
+			select {
+			case <-node.electionTimer.C:
+				node.mu.Lock()
+				node.electionTimer.Reset(randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
+				if node.state == Follower {
+					node.convertTo(Candidate) //convert and start election
+				} else {
+					node.startElection()
+				}
+				node.mu.Unlock()
+			case <-node.heartbeatTimer.C:
+				node.mu.Lock()
+				if node.state == Leader {
+					node.broadcastHeartbeat()
+					// we know the timer has stopped now
+					// no need to call Stop()
+					node.heartbeatTimer.Reset(HeartbeatInterval)
+				}
+				node.mu.Unlock()
+			}
+		}
+	}(rf)
 	return rf
 }
