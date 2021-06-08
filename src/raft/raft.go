@@ -105,6 +105,7 @@ func (rf *Raft) GetState() (int, bool) {
 	}
 	term=rf.currentTerm
 	return term, isleader
+	
 }
 
 //
