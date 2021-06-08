@@ -17,7 +17,11 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"math/rand"
+	"sync"
+	"time"
+)
 import "sync/atomic"
 import "../labrpc"
 
@@ -26,6 +30,19 @@ import "../labrpc"
 
 
 
+const (
+	HeartbeatInterval    = time.Duration(120) * time.Millisecond
+	ElectionTimeoutLower = time.Duration(300) * time.Millisecond
+	ElectionTimeoutUpper = time.Duration(400) * time.Millisecond
+)
+
+type NodeState uint8
+
+const (
+	Follower  = NodeState(1)
+	Candidate = NodeState(2)
+	Leader    = NodeState(3)
+)
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -43,6 +60,9 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type LogEntry struct {
+
+}
 //
 // A Go object implementing a single Raft peer.
 //
@@ -53,10 +73,24 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
+	currentTerm    int
+	votedFor       int
+	heartbeatTimer *time.Timer
+	electionTimer  *time.Timer
+	state          NodeState
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+}
+
+type AppendEntries struct {
+	term int
+	leaderId int
+	prevLogIndex int
+	prevLogTerm int
+	entries      []LogEntry//需要被保存的日志条目（被当做心跳使用是 则日志条目内容为空；为了提高效率可能一次性发送多个）
+	leaderCommit  int//	领导者的已知已提交的最高的日志条目的索引
 }
 
 // return currentTerm and whether this server
@@ -66,6 +100,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	if rf.state==Leader{
+		isleader=true
+	}
+	term=rf.currentTerm
 	return term, isleader
 }
 
@@ -109,14 +147,49 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 
+func convertTo(rf *Raft,s NodeState){
 
+	if s == rf.state {
+		return
+	}
+	DPrintf("Term %d:server %d convert from %v to %v\n",
+		rf.currentTerm,rf.me,rf.state,s)
+	pres:=rf.state
+	rf.state=s
+	switch s{
+	case Follower:
+		if pres==Leader{
+			rf.heartbeatTimer.Stop()
+		}
+		resetTimer(rf.electionTimer,randTimeDuration(ElectionTimeoutLower,ElectionTimeoutUpper))
+		rf.votedFor=-1
+	case Leader:
+		rf.electionTimer.Stop()
+		rf.broadcastHeartbeat()
+		resetTimer(rf.heartbeatTimer,HeartbeatInterval)
+	case Candidate:
+		rf.state=Candidate
+		rf.startElection()
+	}
+}
 
+func (rf *Raft) broadcastHeartbeat(){
+
+}
+
+func (rf *Raft) startElection(){
+
+}
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	term	int //候选人的任期号
+	candidateId	int //请求选票的候选人的 Id 2A
+	lastLogIndex	int//候选人的最后日志条目的索引值
+	lastLogTerm	  int//候选人最后日志条目的任期号 2B
 }
 
 //
@@ -125,13 +198,17 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	term	int//当前任期号，以便于候选人去更新自己的任期号
+	voteGranted	bool//候选人赢得了此张选票时为真
 }
+
 
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
 }
 
 //
@@ -167,6 +244,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
+
+func ()
 
 
 //
@@ -240,4 +319,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 
 	return rf
+}
+
+func randTimeDuration(lower time.Duration,upper time.Duration) time.Duration{
+	num:=rand.Int63n(upper.Nanoseconds()-lower.Nanoseconds())+lower.Nanoseconds()
+	return time.Duration(num)*time.Nanosecond
+}
+func resetTimer(timer *time.Timer,d time.Duration){
+	if !timer.Stop() {
+		select {
+		case <-timer.C: //try to drain from the channel
+		default:
+		}
+	}
+	timer.Reset(d)
 }
