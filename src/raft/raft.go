@@ -61,7 +61,8 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
-
+	term int
+	command interface{}
 }
 //
 // A Go object implementing a single Raft peer.
@@ -78,6 +79,7 @@ type Raft struct {
 	heartbeatTimer *time.Timer
 	electionTimer  *time.Timer
 	state          NodeState
+	log LogEntry
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
