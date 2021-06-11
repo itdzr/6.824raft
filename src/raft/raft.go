@@ -200,7 +200,7 @@ func (rf *Raft) broadcastHeartbeat() {
 		}
 		go func(server int) {
 			rf.mu.Lock()
-			defer rf.mu.Unlock()
+
 			if rf.state != Leader {
 				rf.mu.Unlock()
 				return
@@ -209,17 +209,26 @@ func (rf *Raft) broadcastHeartbeat() {
 				Term:     rf.currentTerm,
 				LeaderId: rf.me,
 			}
+			rf.mu.Unlock()
 			reply := &AppendEntriesReply{}
-			rf.sendAppendEntries(server, args, reply)
-
-			if reply.Success {
-
-			} else {
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.convertTo(Follower)
+			if rf.sendAppendEntries(server, args, reply) {
+				rf.mu.Lock()
+				if rf.state != Leader {
+					rf.mu.Unlock()
+					return
 				}
+				DPrintf("%+v state %v got appendEntries response from node %d, success=%v, Term=%d",
+					rf, rf.state, server, reply.Success, reply.Term)
+				if reply.Success {
 
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.convertTo(Follower)
+					}
+
+				}
+				rf.mu.Unlock()
 			}
 
 		}(i)
@@ -243,9 +252,10 @@ func (rf *Raft) startElection() {
 
 			reply := &RequestVoteReply{}
 			if rf.sendRequestVote(server, args, reply) {
-				rf.mu.Lock() //must lock after rpc
-				DPrintf("%+v got RequestVote response from node %d, VoteGranted=%v, Term=%d",
-					rf, server, reply.VoteGranted, reply.Term)
+				rf.mu.Lock()
+				//must lock after rpc
+				DPrintf("%+v state %v got RequestVote response from node %d, VoteGranted=%v, Term=%d",
+					rf, rf.state, server, reply.VoteGranted, reply.Term)
 				if reply.VoteGranted && rf.state == Candidate {
 					atomic.AddInt64(&count, 1)
 					if atomic.LoadInt64(&count) > int64(len(rf.peers)/2) {
@@ -253,15 +263,15 @@ func (rf *Raft) startElection() {
 					}
 
 				} else {
-					rf.mu.Lock()
+
 					if rf.currentTerm < reply.Term {
 						rf.currentTerm = reply.Term
 						rf.convertTo(Follower)
 					}
 				}
-
+				rf.mu.Unlock()
 			}
-			rf.mu.Unlock()
+
 		}(i)
 
 	}
@@ -297,15 +307,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Term <= rf.currentTerm {
+	DPrintf("RequestVote raft %+v args %+v", rf, args)
+	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
 
-	if rf.state != Follower {
-		rf.convertTo(Follower)
-	}
+	rf.convertTo(Follower)
+
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
@@ -334,6 +344,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		randTimeDuration(ElectionTimeoutLower, ElectionTimeoutUpper))
 
 	reply.Success = true
+	reply.Term = rf.currentTerm //for debug
 
 }
 
@@ -373,6 +384,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendSavePersists(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.SavePersists", args, reply)
 	return ok
 }
 
@@ -455,7 +471,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				if node.state == Follower {
 					node.convertTo(Candidate)
 				} else {
-					node.startElection() //prevent node always be candidate
+					node.startElection() //Avoid electoral defeat
 				}
 				node.mu.Unlock()
 			case <-node.heartbeatTimer.C:
