@@ -99,7 +99,11 @@ type Raft struct {
 	log            []LogEntry
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	// state a Raft server must maintain
+	nextIndex     []int
+	matchIndex    []int
+	commitIndex   int
+	lastApplied   int
 	snapshotIndex int
 }
 
