@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -52,6 +53,10 @@ func (s NodeState) String() string { //for print struct
 		return "Leader"
 	}
 	return "Unknown"
+}
+func (rf *Raft) String() string {
+	return fmt.Sprintf("[node(%d), state(%v), term(%d), snapshottedIndex(%d)]",
+		rf.me, rf.state, rf.currentTerm, rf.snapshotIndex)
 }
 
 //
@@ -95,7 +100,7 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+	snapshotIndex int
 }
 
 type AppendEntriesArgs struct {
