@@ -286,6 +286,7 @@ func (rf *Raft) broadcastHeartbeat() {
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.convertTo(Follower)
+						rf.persist()
 					} else {
 						//for !reply.Success {
 						//DPrintf("11")
@@ -320,7 +321,9 @@ func (rf *Raft) broadcastHeartbeat() {
 	}
 }
 
+//should be called with lock
 func (rf *Raft) startElection() {
+	defer rf.persist()
 	var count int64
 	rf.currentTerm += 1
 	lastLogIndex := len(rf.logs) - 1
@@ -355,6 +358,7 @@ func (rf *Raft) startElection() {
 					if rf.currentTerm < reply.Term {
 						rf.currentTerm = reply.Term
 						rf.convertTo(Follower)
+						rf.persist()
 					}
 				}
 				rf.mu.Unlock()
@@ -417,6 +421,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	//DPrintf("RequestVote raft %+v args %+v", rf, args)
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
@@ -453,6 +458,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist() // execute before rf.mu.Unlock()
 	// Your code here (2A, 2B).
 	if args.Term < rf.currentTerm {
 		reply.Success = false
@@ -566,6 +574,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.logs) - 1
 		rf.nextIndex[rf.me] = index + 1
 		rf.matchIndex[rf.me] = index
+		rf.persist()
 		rf.broadcastHeartbeat()
 		rf.mu.Unlock()
 
