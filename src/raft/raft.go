@@ -225,54 +225,7 @@ func (rf *Raft) convertTo(s NodeState) {
 }
 
 func (rf *Raft) broadcastHeartbeat() {
-
-	for i := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-		go func(server int) {
-			rf.mu.Lock()
-
-			if rf.state != Leader {
-				rf.mu.Unlock()
-				return
-			}
-			prevLogIndex := rf.nextIndex[server] - 1
-			args := &AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				LeaderCommit: rf.commitIndex,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  rf.logs[prevLogIndex].Term,
-			}
-			rf.mu.Unlock()
-			reply := &AppendEntriesReply{}
-			if rf.sendAppendEntries(server, args, reply) {
-				rf.mu.Lock()
-				if rf.state != Leader {
-					rf.mu.Unlock()
-					return
-				}
-				DPrintf("%+v state %v got broadcastHeartbeat response from node %d, success=%v, Term=%d",
-					rf, rf.state, server, reply.Success, reply.Term)
-				if reply.Success {
-
-				} else {
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.convertTo(Follower)
-					}
-
-				}
-				rf.mu.Unlock()
-			}
-
-		}(i)
-	}
-}
-
-func (rf *Raft) broadcastAppendEntries() {
-	DPrintf("rf[%d] logs[%v]", rf.me, rf.logs)
+	//DPrintf("rf[%d] logs[%v]", rf.me, rf.logs)
 
 	for i := range rf.peers {
 		if i == rf.me {
@@ -613,7 +566,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.logs) - 1
 		rf.nextIndex[rf.me] = index + 1
 		rf.matchIndex[rf.me] = index
-		rf.broadcastAppendEntries()
+		rf.broadcastHeartbeat()
 		rf.mu.Unlock()
 
 	}
